@@ -1,4 +1,4 @@
-# libretv_app
+# FlutterTV-Launcher
 
 A new Flutter project.
 
