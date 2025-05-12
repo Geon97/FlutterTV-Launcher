@@ -1,5 +1,8 @@
+import 'dart:io';
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:webview_flutter/webview_flutter.dart';
+import 'package:device_info_plus/device_info_plus.dart';
 
 void main() {
   WidgetsFlutterBinding.ensureInitialized();
@@ -7,12 +10,12 @@ void main() {
 }
 
 class MyApp extends StatelessWidget {
-  const MyApp({super.key});
+  const MyApp({Key? key}) : super(key: key);
 
   @override
   Widget build(BuildContext context) {
     return MaterialApp(
-      title: 'TV App',
+      title: 'Adaptive WebView App',
       theme: ThemeData(
         primarySwatch: Colors.blue,
         visualDensity: VisualDensity.adaptivePlatformDensity,
@@ -23,88 +26,187 @@ class MyApp extends StatelessWidget {
 }
 
 class MyHomePage extends StatefulWidget {
-  const MyHomePage({super.key});
+  const MyHomePage({Key? key}) : super(key: key);
 
   @override
   State<MyHomePage> createState() => _MyHomePageState();
 }
 
 class _MyHomePageState extends State<MyHomePage> {
-  late final WebViewController _controller;
-  final String _fixedUrl = 'https://libretv-3c1.pages.dev'; // 固定 URL
+  WebViewController? _controller;
+  final FocusNode _keyboardFocusNode = FocusNode();
+  final String _url = 'https://libretv-3c1.pages.dev';
   bool _isLoading = true;
   String? _errorMessage;
+  bool _isTV = false;
 
   @override
   void initState() {
     super.initState();
+    _init();
+  }
 
-    _controller = WebViewController()
-      ..setJavaScriptMode(JavaScriptMode.unrestricted) // 启用 JavaScript
-      ..setBackgroundColor(const Color(0x00000000)) // 设置背景透明
+  Future<void> _init() async {
+    final info = await DeviceInfoPlugin().androidInfo;
+    setState(() {
+      _isTV = info.systemFeatures.contains('android.hardware.type.television');
+    });
+    _setupUI();
+    _createWebViewController();
+    if (_isTV) {
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        _keyboardFocusNode.requestFocus();
+      });
+    }
+  }
+
+  void _setupUI() {
+    if (_isTV) {
+      SystemChrome.setEnabledSystemUIMode(SystemUiMode.edgeToEdge);
+    } else {
+      SystemChrome.setEnabledSystemUIMode(SystemUiMode.immersiveSticky);
+    }
+  }
+
+  void _createWebViewController() {
+    final controller = WebViewController()
+      ..setJavaScriptMode(JavaScriptMode.unrestricted)
+      ..setBackgroundColor(const Color(0x00000000))
       ..setNavigationDelegate(
         NavigationDelegate(
-          onProgress: (int progress) {
-            if (progress < 100 && !_isLoading) {
-              setState(() {
-                _isLoading = true;
-                _errorMessage = null;
-              });
-            }
-          },
-          onPageStarted: (String url) {
-            setState(() {
-              _isLoading = true;
-              _errorMessage = null;
-            });
-          },
-          onPageFinished: (String url) {
-            setState(() => _isLoading = false);
-          },
-          onWebResourceError: (WebResourceError error) {
-            setState(() {
-              _isLoading = false;
-              _errorMessage = "加载失败: ${error.description}";
-            });
-          },
+          onProgress: (progress) => setState(() => _isLoading = progress < 100),
+          onPageStarted: (_) => setState(() {
+            _isLoading = true;
+            _errorMessage = null;
+          }),
+          onPageFinished: (_) => setState(() => _isLoading = false),
+          onWebResourceError: (e) => setState(() {
+            _isLoading = false;
+            _errorMessage = '加载失败: ${e.description}';
+          }),
         ),
       )
-      ..loadRequest(Uri.parse(_fixedUrl)); // 加载指定的 URL
+      ..loadRequest(Uri.parse(_url));
+    setState(() {
+      _controller = controller;
+    });
+  }
+
+  void _scrollWebView(int dx, int dy) {
+    _controller?.runJavaScript('window.scrollBy($dx, $dy);');
+  }
+
+  void _tapCenter() {
+    const js = r"""
+      (function() {
+        const x = window.innerWidth / 2;
+        const y = window.innerHeight / 2;
+        const el = document.elementFromPoint(x, y);
+        if (el) el.click();
+      })();
+    """;
+    _controller?.runJavaScript(js);
+  }
+
+  void _dispatchTab(bool reverse) {
+    final js = reverse
+        ? "document.dispatchEvent(new KeyboardEvent('keydown', {key: 'Tab', keyCode: 9, which: 9, shiftKey: true, bubbles: true}));"
+        : "document.dispatchEvent(new KeyboardEvent('keydown', {key: 'Tab', keyCode: 9, which: 9, bubbles: true}));";
+    _controller?.runJavaScript(js);
+  }
+
+  void _handleTVKey(RawKeyEvent event) {
+    if (event is RawKeyDownEvent) {
+      final key = event.logicalKey;
+      debugPrint('TV Key pressed: key=${key.debugName}');
+      if (key == LogicalKeyboardKey.arrowDown || key == LogicalKeyboardKey.arrowRight) {
+        debugPrint('Action: tab forward');
+        _dispatchTab(false);
+      } else if (key == LogicalKeyboardKey.arrowUp || key == LogicalKeyboardKey.arrowLeft) {
+        debugPrint('Action: tab backward');
+        _dispatchTab(true);
+      } else if (key == LogicalKeyboardKey.select || key == LogicalKeyboardKey.enter) {
+        debugPrint('Action: tap center');
+        _tapCenter();
+      } else {
+        debugPrint('Unhandled key');
+      }
+    }
   }
 
   @override
   Widget build(BuildContext context) {
+    final controller = _controller;
+    Widget content;
+    if (controller == null) {
+      content = const Center(child: CircularProgressIndicator());
+    } else {
+      content = WebViewWidget(controller: controller);
+    }
+
+    if (_isTV) {
+      return RawKeyboardListener(
+        focusNode: _keyboardFocusNode,
+        autofocus: true,
+        onKey: _handleTVKey,
+        child: Scaffold(
+          body: Stack(
+            children: [
+              content,
+              if (_errorMessage != null)
+                Positioned(
+                  top: 20,
+                  left: 0,
+                  right: 0,
+                  child: Container(
+                    color: Colors.red.withOpacity(0.7),
+                    padding: const EdgeInsets.all(8),
+                    child: Text(
+                      _errorMessage!,
+                      style: const TextStyle(color: Colors.white),
+                      textAlign: TextAlign.center,
+                    ),
+                  ),
+                ),
+            ],
+          ),
+        ),
+      );
+    }
+
     return Scaffold(
       body: Stack(
         children: [
-          WebViewWidget(controller: _controller), // WebView 控件
-          if (_isLoading)
-            const Center(
-              child: CircularProgressIndicator(
-                strokeWidth: 5,
-              ),
-            ),
+          content,
           if (_errorMessage != null)
             Positioned(
               top: 20,
               left: 0,
               right: 0,
               child: Container(
-                padding: const EdgeInsets.all(8),
                 color: Colors.red.withOpacity(0.7),
+                padding: const EdgeInsets.all(8),
                 child: Text(
                   _errorMessage!,
+                  style: const TextStyle(color: Colors.white),
                   textAlign: TextAlign.center,
-                  style: const TextStyle(color: Colors.white, fontSize: 16),
                 ),
               ),
             ),
         ],
       ),
-      floatingActionButton: FloatingActionButton(
-        onPressed: () => _controller.reload(), // 刷新 WebView
+      floatingActionButton: controller != null
+          ? FloatingActionButton(
+        onPressed: () => controller.reload(),
         child: const Icon(Icons.refresh),
-      ),
+      )
+          : null,
     );
+  }
+
+  @override
+  void dispose() {
+    _keyboardFocusNode.dispose();
+    super.dispose();
   }
 }
